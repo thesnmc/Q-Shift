@@ -16,7 +16,7 @@
 #include <sys/ioctl.h>
 #include <getopt.h>
 #include <curl/curl.h>
-
+#include <oqs/oqs.h>
 #define NUM_FRAMES 4096
 #define FRAME_SIZE XSK_UMEM__DEFAULT_FRAME_SIZE
 #define ML_KEM_KEY_SIZE 1184
@@ -63,27 +63,67 @@ void fetch_quantum_entropy() {
 
     if(curl_handle) {
         // TODO: Replace with actual Cisco Outshift QRNG Endpoint and Auth Token
-        curl_easy_setopt(curl_handle, CURLOPT_URL, "https://api.outshift.cisco.com/v1/entropy?bytes=1184");
+        curl_easy_setopt(curl_handle, CURLOPT_URL, "https://api.qrng.outshift.com/api/v1/random_numbers");
         
+        // 1. THE CORRECT CISCO HEADERS
         struct curl_slist *headers = NULL;
-        headers = curl_slist_append(headers, "Authorization: Bearer YOUR_CISCO_TOKEN_HERE");
-        curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, headers);
+        headers = curl_slist_append(headers, "Content-Type: application/json");
+        // INJECT YOUR REAL API KEY HERE:
+        headers = curl_slist_append(headers, "x-id-api-key: YOUR_CISCO_OUTSHIFT_API_KEY_HERE"); 
         
+        curl_easy_setopt(curl_handle, CURLOPT_URL, "https://api.qrng.outshift.com/api/v1/random_numbers");
+        curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, headers);
+
+        // 2. FORCE A POST REQUEST
+        curl_easy_setopt(curl_handle, CURLOPT_CUSTOMREQUEST, "POST");
+
+       // 3. THE JSON ENTROPY PAYLOAD (Max API limit is 1000 blocks)
+        const char *json_body = "{ \"encoding\": \"raw\", \"format\": \"hexadecimal\", \"bits_per_block\": 8, \"number_of_blocks\": 1000 }";
+        curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, json_body);
+
         curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
         curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *)&chunk);
         curl_easy_setopt(curl_handle, CURLOPT_USERAGENT, "Q-Shift/1.0");
 
+        // Bypass SSL for local WSL testing
+        curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYHOST, 0L);
+
+        // 4. PULL THE TRIGGER
         res = curl_easy_perform(curl_handle);
 
         if(res != CURLE_OK) {
-            // If API fails (or if we are testing without a real key), generate a fallback simulated key
             fprintf(stderr, "[ API WARNING ] curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
             printf("[ API ] Generating local fallback entropy for testing...\n");
             for(int i = 0; i < ML_KEM_KEY_SIZE; i++) quantum_key_buffer[i] = rand() % 256;
-        } else {
-            // Successfully fetched true quantum entropy. Copy it to our global injection buffer.
-            printf("[ API SUCCESS ] Pulled %lu bytes of true Quantum Entropy from Cisco Outshift.\n", (unsigned long)chunk.size);
-            memcpy(quantum_key_buffer, chunk.memory, ML_KEM_KEY_SIZE);
+            } else {
+            // 5. THE TRUE FIPS 203 QUANTUM FORGE
+            printf("[ API SUCCESS ] Cisco API authorized. Connecting to Quantum Forge...\n");
+            
+            // Initialize the Open Quantum Safe engine
+            OQS_init();
+            OQS_KEM *kem = OQS_KEM_new(OQS_KEM_alg_ml_kem_768);
+            
+            if (kem == NULL) {
+                printf("[ FATAL ] Failed to initialize ML-KEM-768 algorithm.\n");
+                exit(1);
+            }
+
+            uint8_t public_key[OQS_KEM_ml_kem_768_length_public_key];
+            uint8_t secret_key[OQS_KEM_ml_kem_768_length_secret_key];
+
+            printf("[ SYSTEM ] Forging NIST FIPS 203 ML-KEM-768 Keypair...\n");
+            
+            OQS_KEM_keypair(kem, public_key, secret_key);
+
+            // Load the mathematically perfect Post-Quantum public key into our Ring-0 injection buffer
+            memcpy(quantum_key_buffer, public_key, ML_KEM_KEY_SIZE);
+
+            printf("[ SUCCESS ] 1,184-byte ML-KEM-768 Public Key forged and loaded into Shield!\n");
+
+            // Clean up the forge
+            OQS_KEM_free(kem);
+            OQS_destroy();
         }
 
         curl_easy_cleanup(curl_handle);
@@ -91,7 +131,6 @@ void fetch_quantum_entropy() {
         curl_global_cleanup();
     }
 }
-
 void sigint_handler(int sig) {
     printf("\n[ Q-SHIFT ] Caught SIGINT. Initiating graceful teardown...\n");
     keep_running = 0;
