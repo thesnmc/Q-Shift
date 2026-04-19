@@ -1,5 +1,10 @@
 # Q-Shift: eBPF-Driven Post-Quantum Cryptographic Live Patching
 
+![eBPF](https://img.shields.io/badge/Kernel-eBPF%20%2F%20XDP-black?logo=linux) 
+![C](https://img.shields.io/badge/Language-C-blue) 
+![PQC](https://img.shields.io/badge/Crypto-NIST%20FIPS%20203%20(ML--KEM)-green) 
+![Status](https://img.shields.io/badge/Status-Operational-success)
+
 Q-Shift is a transparent, in-kernel network middleware designed to defeat "Harvest Now, Decrypt Later" (HNDL) attacks.
 
 By leveraging Extended Berkeley Packet Filter (eBPF) at the eXpress Data Path (XDP) layer, Q-Shift intercepts classical TLS 1.3 handshakes in real-time and injects NIST-standardized Post-Quantum Cryptography (ML-KEM-768). This instantly upgrades unpatchable, legacy backend servers to quantum-resistant standards without altering a single line of their application code.
