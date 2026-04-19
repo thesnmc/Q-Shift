@@ -16,23 +16,29 @@ Q-Shift is built on a philosophy of absolute data sovereignty and stateless exec
 ## 2. The Architectural Pipeline: Core Features & Execution
 Q-Shift operates as a multi-stage, high-velocity pipeline, intercepting and manipulating packets at the Network Interface Card (NIC) driver level, before the Linux kernel network stack allocates an `sk_buff` (socket buffer).
 
-### Phase 1: The Ring-0 XDP Filter
-The system attaches a heavily optimized eBPF program directly to the NIC. This filter operates on bare-metal packet bytes. It parses incoming Ethernet, IPv4, and TCP headers using strict mathematical offsets. It scans specifically for TCP packets bound for destination port 443 (HTTPS) and identifies the unique byte signatures of a TLS 1.3 ClientHello message. If a packet lacks these precise markers, the program executes an `XDP_PASS` verdict in nanoseconds, returning the packet to the standard kernel stack and ensuring absolute zero latency for non-target traffic.
+### Phase 1: The Ring-0 XDP Filter & TCP State Machine
+The system attaches a heavily optimized eBPF program directly to the NIC. This filter operates on bare-metal packet bytes. It parses incoming Ethernet, IPv4, and TCP headers using strict mathematical offsets. It scans specifically for TCP packets bound for destination port 443 (HTTPS) and identifies the unique byte signatures of a TLS 1.3 ClientHello message. If a packet lacks these precise markers, the program executes an `XDP_PASS` verdict in nanoseconds, returning the packet to the standard kernel stack.
+* **The Retransmission Buffer:** Because XDP is inherently stateless, Q-Shift implements an eBPF LRU (Least Recently Used) Hash Map as a localized Replay Buffer. When the filter detects a ClientHello, it mathematically queries the Sequence Number against this map. If it recognizes a TCP Retransmission, it instantly bypasses User-Space, pulls the previously forged quantum payload directly from the kernel memory, and fires it back via `XDP_TX`. This grants stateful TCP reliability in a stateless Ring-0 environment.
 
 ### Phase 2: The AF_XDP Memory Bridge
 Injecting an ML-KEM-768 public key requires exactly 1,184 bytes of payload expansion. Attempting to grow a packet by this magnitude inside the kernel violates the rigid memory bounds and safety checks of the eBPF verifier. To bypass this, the XDP program redirects target ClientHello packets via the `XDP_REDIRECT` action into an `AF_XDP` Shared Memory (UMEM) ring. This mechanism pulls the raw packet into User-Space RAM with zero-copy overhead, bypassing the kernel's memory expansion restrictions entirely.
 
-### Phase 3: The Live Quantum Forge & Pre-Fetch Engine (liboqs)
-In User-Space, a high-performance C daemon manages the cryptographic forge. True, hardware-derived quantum entropy is pre-fetched asynchronously from the Cisco Outshift QRNG API. This entropy acts as the seed for the Open Quantum Safe (`liboqs`) engine, which generates a mathematically perfect, FIPS 203 compliant ML-KEM-768 keypair.
+### Phase 3: The TLS 1.3 Dynamic Parser (Pointer Arithmetic)
+In our early architecture, the `key_share` extension was assumed to be at a hardcoded byte offset. However, real-world browsers send variable-length Server Name Indications (SNI) and ALPN protocols, causing the target extension to shift wildly and risk payload corruption. 
+* Q-Shift now utilizes a strict, bounds-checked Type-Length-Value (TLV) Pointer Jumper. It mathematically skips the TLS Record and Handshake headers, vaults over variable-length Session IDs and Cipher Suites, and executes a `while()` loop through the Extensions block. It dynamically hunts for the `0x0033` code, locking onto the precise memory pointer for injection in microseconds, regardless of the browser or domain name.
 
-When a target packet enters the UMEM ring, the daemon instantly injects this 1,184-byte PQC payload into the TLS `key_share` extension, creating a hybrid classical-quantum handshake. If the network is air-gapped or the API is unreachable, an offline-first fallback instantly generates localized simulated entropy, ensuring the routing engine never stalls.
+### Phase 4: The Decoupled Async Entropy Broker & Quantum Forge
+To guarantee mathematical perfection, Q-Shift does not rely on local pseudo-randomness. However, placing an API fetch inside the main packet processing loop creates severe latency. 
+* **The Abstraction Layer:** Q-Shift utilizes a completely separate, asynchronous background daemon (the `entropy_broker`). Its sole job is to fetch true quantum noise from the Cisco Outshift QRNG API (or hardware appliances like ID Quantique) and pipe it directly into a local Linux RAM pipe (`/dev/shm`). 
+* The main User-Space daemon reads this pipe instantly, feeding the physical quantum noise into the `liboqs` engine to forge a FIPS 203 compliant ML-KEM-768 keypair in real-time. If the API is unreachable, an offline-first fallback instantly generates localized simulated entropy, ensuring the routing engine never stalls.
 
-### Phase 4: Dynamic TCP Segmentation (The Cleaving)
+### Phase 5: Dynamic TCP Segmentation (The Cleaving)
 The expanded packet size is mathematically calculated against the hardware's local Maximum Transmission Unit (MTU). Standard Ethernet MTU is 1,500 bytes. With the 1,184-byte injection, the packet frequently exceeds 1,600 bytes. If the new size breaches the MTU, the daemon executes dynamic TCP segmentation. It mathematically cleaves the payload into two distinct frames:
 * **The Vanguard Packet:** Maxes out the MTU (e.g., 1,448 bytes of TCP payload).
 * **The Remnant Packet:** Carries the overflow (e.g., 165 bytes of TCP payload).
+* *Note:* The successfully forged payload is then pushed down into the Ring-0 LRU Hash map to prepare for any potential packet loss.
 
-### Phase 5: RFC 1071 Checksum Forging & Re-entry
+### Phase 6: RFC 1071 Checksum Forging & Re-entry
 Because the TCP payload length and IP total length have been radically altered across two new packets, the original network checksums are rendered completely invalid. Forwarding these packets would result in immediate drops by downstream routers. Q-Shift utilizes complex 1s-complement arithmetic to forge the RFC 1071 checksums for both the Vanguard and Remnant packets independently.
 
 The incremental checksum update is calculated via:
@@ -51,7 +57,7 @@ During the development of Q-Shift, several critical architectural, environmental
 
 ### Hurdle B: API Latency Bottlenecking the Network
 * **The Problem:** Generating true quantum keys requires an HTTP call to the Cisco Outshift QRNG API. Placing a synchronous `libcurl` network request inside an active packet intercept loop would freeze the server's network stack for 100+ milliseconds per handshake, destroying throughput and causing TCP timeouts.
-* **The Solution:** We engineered an asynchronous "Pre-Fetch" architecture. The daemon queries the API upon boot and maintains a continuous rolling buffer of quantum entropy in local RAM. Packet injection uses this pre-fetched buffer in microseconds. Furthermore, we implemented a stateless "Offline-First" fallback. If the external API fails, the daemon instantly generates local pseudo-random entropy, guaranteeing the shield never crashes.
+* **The Solution:** We separated the network engine from the quantum hardware entirely by engineering the Entropy Broker. The main daemon has zero internet dependencies and reads from a shared memory pipe (`/dev/shm`), entirely bypassing API latency. 
 
 ### Hurdle C: MTU Integer Underflows & Segmentation Faults
 * **The Problem:** When forcing a 1,613-byte packet through a 1,500 MTU Ethernet interface, the kernel drops the packet, and improper TCP offset calculations lead to catastrophic integer underflows (`uint16_t` wrapping) inside the C daemon.
@@ -77,6 +83,10 @@ During the development of Q-Shift, several critical architectural, environmental
 * **The Problem:** Integrating the Cisco Outshift QRNG API presented severe formatting roadblocks. Standard `GET` requests and `Authorization: Bearer` tokens resulted in `[ 31 bytes ]` JSON error messages or complete network resolution failures. Once the correct `POST` format and custom `x-id-api-key` headers were implemented, we hit a hard mathematical ceiling: the API strictly limited output to 1,000 blocks per request to prevent server flooding. An ML-KEM-768 key requires 1,184 bytes, meaning a single API call was insufficient, and executing multiple paginated calls inside a Ring-0 network hook would cause catastrophic packet latency.
 * **The Solution:** We implemented a NIST-approved Deterministic Random Bit Generator (DRBG) flow via `liboqs`. Instead of requiring a 1:1 byte match from the hardware, the C daemon formats a strict `POST` request to pull the maximum allowed 1,000 bytes of quantum noise. This massive 8,000-bit payload of pure entropy is caught in memory and fed directly into the `liboqs` engine as a master seed. The cryptographic forge then instantly stretches that seed to mathematically generate the flawless 1,184-byte Post-Quantum key, perfectly bypassing Cisco's limit without sacrificing FIPS 203 compliance.
 
+### Hurdle I: The eBPF Verifier Memory Loop Panic
+* **The Problem:** When implementing the Ring-0 Fast-Path for TCP retransmissions, the Linux Kernel Verifier outright rejected the BPF bytecode with an `invalid access to packet` fatal error. The verifier flagged the memory copy loop because the length of the forged payload was a dynamic variable (`saved->payload_len`), making it impossible for the static analyzer to mathematically prove the loop wouldn't overwrite protected kernel memory bounds.
+* **The Solution:** We implemented a strict verifier bypass patch. By injecting an explicit, byte-by-byte boundary check (`if ((void *)(dst + 1) > data_end) break;`) directly inside the `#pragma unroll` memory loop, we mathematically proved to the verifier that the pointer would never breach the packet limit, allowing the stateful injection to compile successfully.
+
 ---
 
 ## 4. Architectural Justifications (The "Why")
@@ -86,6 +96,9 @@ Netfilter processes packets significantly higher up the network stack, after the
 
 ### Why AF_XDP over standard AF_PACKET sockets?
 `AF_PACKET` requires the kernel to copy the packet data from kernel space to user space, incurring a massive CPU penalty under heavy loads. `AF_XDP` uses memory-mapped rings shared directly between the hardware driver and the user-space daemon, achieving zero-copy performance critical for maintaining enterprise-grade TLS handshake volumes.
+
+### Why implement an LRU Hash Map for TCP State?
+Because XDP sits below the TCP stack, it has no native concept of connections or retransmissions. By utilizing an eBPF Least Recently Used (LRU) Map keyed by Sequence Number, the kernel can autonomously recognize dropped packet retries. Using an LRU specific map ensures that as the map fills up with thousands of handshakes, the kernel automatically purges the oldest, stale connections to prevent memory exhaustion, requiring zero manual garbage collection from User-Space.
 
 ### Why implement a "Fail-Open" Entropy Fallback instead of "Fail-Closed"?
 In traditional security, if an encryption requirement fails, the connection drops entirely (Fail-Closed). However, in critical enterprise network infrastructure, dropping all live traffic simply because an external API timed out is unacceptable. Q-Shift implements a "Fail-Open to Local" design. It guarantees that the network keeps flowing with the highest available security (local pseudo-random entropy) rather than completely blackholing the server. Uptime is king.
@@ -109,7 +122,7 @@ FIPS 203 (ML-KEM) is the finalized NIST standard for Post-Quantum Key Encapsulat
 ### eBPF and Kernel Space Interactions
 
 **Q1: What happens if the eBPF verifier rejects the XDP program during loading?**
-*A:* The `libbpf` loader will throw a verifier log to stderr. Rejections usually stem from unbounded loops or out-of-bounds memory access. Q-Shift uses `#pragma unroll` and strict bounds checking to ensure compliance with the verifier's static analysis.
+*A:* The `libbpf` loader will throw a verifier log to stderr. Rejections usually stem from unbounded loops or out-of-bounds memory access. Q-Shift uses `#pragma unroll` and strict bounds checking, specifically validating `dst + 1 > data_end` before memory writes, to ensure compliance with the verifier's static analysis.
 
 **Q2: Does Q-Shift use XDP Generic or XDP Native mode?**
 *A:* Q-Shift defaults to XDP Native (driver-level) for maximum performance. If the NIC driver does not support native XDP, it gracefully falls back to XDP Generic (SKB mode), though this incurs a minor performance penalty.
@@ -121,7 +134,7 @@ FIPS 203 (ML-KEM) is the finalized NIST standard for Post-Quantum Key Encapsulat
 *A:* Through an `AF_XDP` socket utilizing four memory rings: the UMEM Fill Ring, UMEM Completion Ring, RX Ring, and TX Ring. The eBPF program places the packet descriptor in the RX ring, and User-Space consumes it.
 
 **Q5: Why not use eBPF Maps to pass the quantum key down to the kernel?**
-*A:* eBPF Maps are limited in size and access speed. Passing a 1,184-byte array per packet from User-Space to Kernel-Space via Maps introduces heavy spin-locking and race conditions under high concurrency. `AF_XDP` avoids this bottleneck entirely.
+*A:* eBPF Maps are limited in size and access speed. Passing a 1,184-byte array per packet from User-Space to Kernel-Space via Maps introduces heavy spin-locking and race conditions under high concurrency. `AF_XDP` avoids this bottleneck entirely for initial payload expansion, while specific LRU Maps are used exclusively for caching pre-forged fast-path retransmissions.
 
 **Q6: What if the TLS ClientHello is split across multiple TCP packets?**
 *A:* Q-Shift currently parses contiguous ClientHello headers. If a client intentionally fragments the ClientHello at the TCP layer, the BPF program will not find the full signature and will safely `XDP_PASS` the packet to the standard kernel reassembly stack.
@@ -146,7 +159,7 @@ FIPS 203 (ML-KEM) is the finalized NIST standard for Post-Quantum Key Encapsulat
 *A:* NIST and the NSA strongly recommend hybrid cryptography during the transition period. If a flaw is discovered in the mathematical lattice of ML-KEM, the classical X25519 ECC key still provides a secure baseline.
 
 **Q12: How do you identify where to inject the key in the TLS payload?**
-*A:* The daemon parses the TLS 1.3 Record Layer, identifies the Handshake Protocol (Type 1), iterates through the extensions, locates the `key_share` extension (ID `0x0033`), and manipulates the memory buffer exactly at the `supported_groups` offset.
+*A:* The daemon parses the TLS 1.3 Record Layer and executes a dynamic Type-Length-Value (TLV) pointer jumper loop. It dynamically steps over session lengths and cipher suites to isolate the `0x0033` (`key_share`) extension, ensuring zero payload corruption even if upstream routing alters SNI fields.
 
 **Q13: Does Q-Shift generate the ML-KEM keypair itself?**
 *A:* No. Q-Shift acts as the deployment vehicle. The actual mathematical generation of the FIPS 203 compliant ML-KEM-768 keypair is handled by the integrated `liboqs` Open Quantum Safe library, seeded by hardware entropy.
