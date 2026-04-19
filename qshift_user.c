@@ -15,11 +15,14 @@
 #include <signal.h>
 #include <sys/ioctl.h>
 #include <getopt.h>
-#include <curl/curl.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <oqs/oqs.h>
+
 #define NUM_FRAMES 4096
 #define FRAME_SIZE XSK_UMEM__DEFAULT_FRAME_SIZE
 #define ML_KEM_KEY_SIZE 1184
+#define MAX_PAYLOAD_SIZE 2000
 
 static volatile int keep_running = 1;
 int ifindex;
@@ -27,110 +30,94 @@ int ifindex;
 // Global buffer for our Pre-Fetched Quantum Key
 uint8_t quantum_key_buffer[ML_KEM_KEY_SIZE];
 
-// --- libcurl Memory Struct ---
-struct MemoryStruct {
-    char *memory;
-    size_t size;
+// THE STATE TRACKER STRUCT (Must match the Kernel)
+struct saved_payload {
+    uint32_t payload_len;
+    uint8_t data[MAX_PAYLOAD_SIZE];
 };
 
-// --- libcurl Write Callback ---
-static size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp) {
-    size_t realsize = size * nmemb;
-    struct MemoryStruct *mem = (struct MemoryStruct *)userp;
-    char *ptr = realloc(mem->memory, mem->size + realsize + 1);
-    if(!ptr) {
-        printf("Not enough memory (realloc returned NULL)\n");
-        return 0;
-    }
-    mem->memory = ptr;
-    memcpy(&(mem->memory[mem->size]), contents, realsize);
-    mem->size += realsize;
-    mem->memory[mem->size] = 0;
-    return realsize;
-}
+// --- THE DYNAMIC TLS POINTER JUMPER ---
+int locate_tls_key_share(unsigned char *payload, int payload_size) {
+    if (payload_size < 43) return -1; 
+    if (payload[0] != 0x16 || payload[5] != 0x01) return -1;
 
-// --- CISCO OUTSHIFT QRNG PRE-FETCHER ---
-void fetch_quantum_entropy() {
-    printf("[ API ] Contacting Cisco Outshift QRNG API...\n");
-    CURL *curl_handle;
-    CURLcode res;
-    struct MemoryStruct chunk;
-    chunk.memory = malloc(1); 
-    chunk.size = 0;
+    int p = 43; 
+    if (p >= payload_size) return -1; 
+    uint8_t session_id_len = payload[p];
+    p += 1 + session_id_len;
 
-    curl_global_init(CURL_GLOBAL_ALL);
-    curl_handle = curl_easy_init();
+    if (p + 2 > payload_size) return -1;
+    uint16_t cipher_suites_len = (payload[p] << 8) | payload[p+1];
+    p += 2 + cipher_suites_len;
 
-    if(curl_handle) {
-        // TODO: Replace with actual Cisco Outshift QRNG Endpoint and Auth Token
-        curl_easy_setopt(curl_handle, CURLOPT_URL, "https://api.qrng.outshift.com/api/v1/random_numbers");
+    if (p >= payload_size) return -1;
+    uint8_t comp_methods_len = payload[p];
+    p += 1 + comp_methods_len;
+
+    if (p + 2 > payload_size) return -1;
+    uint16_t total_ext_len = (payload[p] << 8) | payload[p+1];
+    p += 2;
+
+    int ext_end = p + total_ext_len;
+    if (ext_end > payload_size) ext_end = payload_size; 
+
+    // TLV HUNTER LOOP
+    while (p + 4 <= ext_end) {
+        uint16_t ext_type = (payload[p] << 8) | payload[p+1];
+        uint16_t ext_len = (payload[p+2] << 8) | payload[p+3];
         
-        // 1. THE CORRECT CISCO HEADERS
-        struct curl_slist *headers = NULL;
-        headers = curl_slist_append(headers, "Content-Type: application/json");
-        // INJECT YOUR REAL API KEY HERE:
-        headers = curl_slist_append(headers, "x-id-api-key: YOUR_CISCO_OUTSHIFT_API_KEY_HERE"); 
-        
-        curl_easy_setopt(curl_handle, CURLOPT_URL, "https://api.qrng.outshift.com/api/v1/random_numbers");
-        curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, headers);
-
-        // 2. FORCE A POST REQUEST
-        curl_easy_setopt(curl_handle, CURLOPT_CUSTOMREQUEST, "POST");
-
-       // 3. THE JSON ENTROPY PAYLOAD (Max API limit is 1000 blocks)
-        const char *json_body = "{ \"encoding\": \"raw\", \"format\": \"hexadecimal\", \"bits_per_block\": 8, \"number_of_blocks\": 1000 }";
-        curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, json_body);
-
-        curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
-        curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *)&chunk);
-        curl_easy_setopt(curl_handle, CURLOPT_USERAGENT, "Q-Shift/1.0");
-
-        // Bypass SSL for local WSL testing
-        curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYPEER, 0L);
-        curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYHOST, 0L);
-
-        // 4. PULL THE TRIGGER
-        res = curl_easy_perform(curl_handle);
-
-        if(res != CURLE_OK) {
-            fprintf(stderr, "[ API WARNING ] curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
-            printf("[ API ] Generating local fallback entropy for testing...\n");
-            for(int i = 0; i < ML_KEM_KEY_SIZE; i++) quantum_key_buffer[i] = rand() % 256;
-            } else {
-            // 5. THE TRUE FIPS 203 QUANTUM FORGE
-            printf("[ API SUCCESS ] Cisco API authorized. Connecting to Quantum Forge...\n");
-            
-            // Initialize the Open Quantum Safe engine
-            OQS_init();
-            OQS_KEM *kem = OQS_KEM_new(OQS_KEM_alg_ml_kem_768);
-            
-            if (kem == NULL) {
-                printf("[ FATAL ] Failed to initialize ML-KEM-768 algorithm.\n");
-                exit(1);
-            }
-
-            uint8_t public_key[OQS_KEM_ml_kem_768_length_public_key];
-            uint8_t secret_key[OQS_KEM_ml_kem_768_length_secret_key];
-
-            printf("[ SYSTEM ] Forging NIST FIPS 203 ML-KEM-768 Keypair...\n");
-            
-            OQS_KEM_keypair(kem, public_key, secret_key);
-
-            // Load the mathematically perfect Post-Quantum public key into our Ring-0 injection buffer
-            memcpy(quantum_key_buffer, public_key, ML_KEM_KEY_SIZE);
-
-            printf("[ SUCCESS ] 1,184-byte ML-KEM-768 Public Key forged and loaded into Shield!\n");
-
-            // Clean up the forge
-            OQS_KEM_free(kem);
-            OQS_destroy();
+        if (ext_type == 0x0033) {
+            return p + 4; // Return exact offset of the VALUE
         }
-
-        curl_easy_cleanup(curl_handle);
-        free(chunk.memory);
-        curl_global_cleanup();
+        p += 4 + ext_len; // Jump to next extension
     }
+    return -1; 
 }
+
+// --- THE BROKER ABSTRACTION ---
+void fetch_quantum_entropy() {
+    printf("[ SYSTEM ] Fetching Quantum Entropy from Broker (/dev/shm/qshift_entropy.bin)...\n");
+    uint8_t entropy_seed[1000];
+    int use_fallback = 1;
+
+    // Read hardware entropy from the shared memory pipe
+    int fd = open("/dev/shm/qshift_entropy.bin", O_RDONLY);
+    if (fd >= 0) {
+        if (read(fd, entropy_seed, sizeof(entropy_seed)) == sizeof(entropy_seed)) {
+            use_fallback = 0;
+            printf("[ SYSTEM ] Successfully loaded hardware entropy from Broker.\n");
+        }
+        close(fd);
+    }
+
+    if (use_fallback) {
+        printf("[ WARNING ] Broker offline or missing data. Using local PRNG fallback...\n");
+        for(int i = 0; i < 1000; i++) entropy_seed[i] = rand() % 256;
+    }
+
+    // THE TRUE FIPS 203 QUANTUM FORGE
+    printf("[ SYSTEM ] Forging NIST FIPS 203 ML-KEM-768 Keypair...\n");
+    OQS_init();
+    OQS_KEM *kem = OQS_KEM_new(OQS_KEM_alg_ml_kem_768);
+
+    if (kem == NULL) {
+        printf("[ FATAL ] Failed to initialize ML-KEM-768 algorithm.\n");
+        exit(1);
+    }
+
+    uint8_t public_key[OQS_KEM_ml_kem_768_length_public_key];
+    uint8_t secret_key[OQS_KEM_ml_kem_768_length_secret_key];
+
+    // In production, the seed is injected into the DRBG here. 
+    OQS_KEM_keypair(kem, public_key, secret_key);
+
+    memcpy(quantum_key_buffer, public_key, ML_KEM_KEY_SIZE);
+    printf("[ SUCCESS ] 1,184-byte ML-KEM-768 Public Key forged and loaded into Shield!\n");
+
+    OQS_KEM_free(kem);
+    OQS_destroy();
+}
+
 void sigint_handler(int sig) {
     printf("\n[ Q-SHIFT ] Caught SIGINT. Initiating graceful teardown...\n");
     keep_running = 0;
@@ -162,7 +149,7 @@ int main(int argc, char **argv) {
     }
 
     signal(SIGINT, sigint_handler);
-    
+
     ifindex = if_nametoindex(ifname);
     if (ifindex == 0) {
         printf("Error: Interface %s not found.\n", ifname);
@@ -172,7 +159,7 @@ int main(int argc, char **argv) {
     int current_mtu = get_mtu(ifname);
     printf("[ SYSTEM ] Interface: %s | Hardware MTU: %d bytes\n", ifname, current_mtu);
 
-    // PRE-FETCH THE QUANTUM KEY BEFORE STARTING THE SHIELD
+    // PRE-FETCH
     fetch_quantum_entropy();
 
     struct bpf_object *obj = bpf_object__open_file("qshift_kern.o", NULL);
@@ -180,9 +167,12 @@ int main(int argc, char **argv) {
     struct bpf_program *prog = bpf_object__find_program_by_name(obj, "qshift_xdp_hook");
     bpf_xdp_attach(ifindex, bpf_program__fd(prog), XDP_FLAGS_SKB_MODE, NULL);
 
+    // GET THE STATE MAP FD
+    int state_map_fd = bpf_object__find_map_fd_by_name(obj, "tcp_state_map");
+
     void *umem_area;
     posix_memalign(&umem_area, getpagesize(), NUM_FRAMES * FRAME_SIZE);
-    
+
     struct xsk_umem *umem;
     struct xsk_ring_prod fq;
     struct xsk_ring_cons cq;
@@ -207,7 +197,7 @@ int main(int argc, char **argv) {
     printf("[ BRIDGE UP ] Q-Shift Active on %s. Waiting for TLS Handshakes...\n", ifname);
 
     struct pollfd fds = { .fd = xsk_fd, .events = POLLIN };
-    
+
     while (keep_running) {
         int ret = poll(&fds, 1, 1000);
         if (ret <= 0) continue;
@@ -216,29 +206,53 @@ int main(int argc, char **argv) {
         if (xsk_ring_cons__peek(&rx, 1, &rx_idx) > 0) {
             const struct xdp_desc *desc = xsk_ring_cons__rx_desc(&rx, rx_idx);
             uint8_t *pkt = xsk_umem__get_data(umem_area, desc->addr);
-            
+
             struct ethhdr *eth = (struct ethhdr *)pkt;
             struct iphdr *ip = (struct iphdr *)(eth + 1);
             struct tcphdr *tcp = (struct tcphdr *)((uint8_t *)ip + (ip->ihl * 4));
-            
+
+            uint8_t *tcp_payload = (uint8_t *)tcp + (tcp->doff * 4);
             uint32_t original_payload_len = ntohs(ip->tot_len) - (ip->ihl * 4) - (tcp->doff * 4);
-            
+
             printf("\n[ +++ Q-SHIFT FORGE INITIATED +++ ]\n");
+
+            // 1. DYNAMIC POINTER JUMP
+            int target_offset = locate_tls_key_share(tcp_payload, original_payload_len);
             
+            if (target_offset != -1) {
+                printf("[ PARSER ] Target Locked: key_share at offset %d. Executing Injection...\n", target_offset);
+                
+                // Shift the original payload down to make room, then inject the quantum key
+                int remaining_len = original_payload_len - target_offset;
+                memmove(tcp_payload + target_offset + ML_KEM_KEY_SIZE, tcp_payload + target_offset, remaining_len);
+                memcpy(tcp_payload + target_offset, quantum_key_buffer, ML_KEM_KEY_SIZE);
+            } else {
+                printf("[ PARSER ] Warning: No key_share found. Injecting at tail fallback...\n");
+                memcpy(tcp_payload + original_payload_len, quantum_key_buffer, ML_KEM_KEY_SIZE);
+            }
+
             uint32_t total_new_payload = original_payload_len + ML_KEM_KEY_SIZE;
             uint32_t max_tcp_payload = current_mtu - (ip->ihl * 4) - (tcp->doff * 4);
-            
-            // NOTE: The actual memory copy of quantum_key_buffer into the packet payload 
-            // happens here in a full production environment right before checksumming.
 
+            // 2. STATE MAP UPDATE
+            uint32_t seq_num = ntohl(tcp->seq);
+            struct saved_payload saved = {0};
+            saved.payload_len = total_new_payload > MAX_PAYLOAD_SIZE ? MAX_PAYLOAD_SIZE : total_new_payload;
+            memcpy(saved.data, tcp_payload, saved.payload_len);
+            
+            // Push the forged packet down into the Kernel LRU Hash Map
+            bpf_map_update_elem(state_map_fd, &seq_num, &saved, BPF_ANY);
+            printf("[ STATE ] Forged payload mapped to TCP Seq %u for Kernel Fast-Path.\n", seq_num);
+
+            // 3. MTU CLEAVE & TRANSMIT
             if (total_new_payload <= max_tcp_payload) {
                 ip->tot_len = htons((ip->ihl * 4) + (tcp->doff * 4) + total_new_payload);
-                ip->id = htons(0x7777); 
-                ip->check = 0; 
+                ip->id = htons(0x7777);
+                ip->check = 0;
                 ip->check = forge_checksum((uint16_t *)ip, ip->ihl * 4);
 
                 printf("Forged Packet (Intact): %u payload bytes. No cleave needed.\n", total_new_payload);
-                
+
                 uint32_t tx_idx;
                 if (xsk_ring_prod__reserve(&tx, 1, &tx_idx) >= 1) {
                     xsk_ring_prod__tx_desc(&tx, tx_idx)->addr = desc->addr;
@@ -249,28 +263,28 @@ int main(int argc, char **argv) {
             } else {
                 uint32_t pkt1_payload_len = max_tcp_payload;
                 uint32_t pkt2_payload_len = total_new_payload - pkt1_payload_len;
-                
+
                 ip->tot_len = htons((ip->ihl * 4) + (tcp->doff * 4) + pkt1_payload_len);
-                ip->id = htons(0x7777); 
-                ip->check = 0; 
+                ip->id = htons(0x7777);
+                ip->check = 0;
                 ip->check = forge_checksum((uint16_t *)ip, ip->ihl * 4);
 
                 printf("Forged Packet 1 (Vanguard): %u payload bytes.\n", pkt1_payload_len);
                 printf("Forged Packet 2 (Remnant): %u payload bytes.\n", pkt2_payload_len);
-                
+
                 uint32_t tx_idx;
                 if (xsk_ring_prod__reserve(&tx, 2, &tx_idx) >= 2) {
                     xsk_ring_prod__tx_desc(&tx, tx_idx)->addr = desc->addr;
                     xsk_ring_prod__tx_desc(&tx, tx_idx)->len = current_mtu;
-                    
+
                     xsk_ring_prod__tx_desc(&tx, tx_idx + 1)->addr = desc->addr + FRAME_SIZE;
                     xsk_ring_prod__tx_desc(&tx, tx_idx + 1)->len = (ip->ihl * 4) + (tcp->doff * 4) + pkt2_payload_len;
-                    
+
                     xsk_ring_prod__submit(&tx, 2);
                     printf("[ SUCCESS ] Segmented Quantum Payloads injected!\n");
                 }
             }
-            
+
             xsk_ring_cons__release(&rx, 1);
         }
     }
