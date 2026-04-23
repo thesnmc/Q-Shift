@@ -1,5 +1,5 @@
 # 🏗️ Architecture & Design Document: Q-Shift
-**Version:** 1.1.0 | **Date:** 2026-04-23 | **Author:** TheSNMC
+**Version:** 1.1.0 | **Date:** 2026-04-23 | **Author:** Sujay
 
 ---
 
