@@ -1,7 +1,7 @@
 # 🚀 Q-Shift
 > A stateless, Ring-0 eBPF network middleware for instant Post-Quantum Cryptographic live-patching.
 
-[![License](https://img.shields.io/badge/License-AGPL%20v3.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-TheSNMC-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20eBPF-lightgrey)]()
 [![Architecture](https://img.shields.io/badge/Architecture-Ring--0%20%7C%20Stateless-success)]()
 
@@ -81,5 +81,5 @@ Q-Shift operates as a multi-stage, high-velocity pipeline intercepting packets b
 Contributions, issues, and feature requests are welcome. Feel free to check the issues page if you want to contribute to the sovereign architecture.
 
 ## 📄 License
-This project is licensed under the GNU Affero General Public License v3.0 (AGPLv3) - see the LICENSE file for details.  
+See the LICENSE file for details.  
 Built by an independent systems architect in Chennai, India.
