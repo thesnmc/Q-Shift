@@ -1,123 +1,85 @@
-# Q-Shift: eBPF-Driven Post-Quantum Cryptographic Live Patching
+# 🚀 Q-Shift
+> A stateless, Ring-0 eBPF network middleware for instant Post-Quantum Cryptographic live-patching.
 
-![eBPF](https://img.shields.io/badge/Kernel-eBPF%20%2F%20XDP-black?logo=linux) 
-![C](https://img.shields.io/badge/Language-C-blue) 
-![PQC](https://img.shields.io/badge/Crypto-NIST%20FIPS%20203%20(ML--KEM)-green) 
-![Status](https://img.shields.io/badge/Status-Operational-success)
-
-Q-Shift is a transparent, in-kernel network middleware designed to defeat "Harvest Now, Decrypt Later" (HNDL) attacks.
-
-By leveraging Extended Berkeley Packet Filter (eBPF) at the eXpress Data Path (XDP) layer, Q-Shift intercepts classical TLS 1.3 handshakes in real-time and injects NIST-standardized Post-Quantum Cryptography (ML-KEM-768). This instantly upgrades unpatchable, legacy backend servers to quantum-resistant standards without altering a single line of their application code.
-
-## 🌐 Core Philosophy: Sovereign & Stateless
-
-Q-Shift is built on strict privacy-by-design principles. It operates entirely as a stateless middleware. No payloads are decrypted, no traffic is stored, and no sensitive data ever touches a cloud provider. It is designed for sovereign infrastructure environments where keeping data and economic value localized and tightly controlled is the highest priority.
-
-## 🚨 The Problem: "Harvest Now, Decrypt Later"
-
-Adversaries and nation-states are actively recording standard Elliptic Curve Cryptography (ECC) and RSA internet traffic today, storing it in massive data centers with the bet that future quantum computers will easily break the encryption. Upgrading enterprise fleets to Post-Quantum standards requires massive application-level rewrites, library updates, and significant downtime.
-
-## 🛡️ The Q-Shift Architecture
-
-Q-Shift pushes the cryptography down to the raw hardware layer (Ring-0) using a fault-tolerant, zero-downtime architecture.
-
-### Phase 1: The Ring-0 Intercept & Stateful LRU Map (eBPF/XDP)
-A highly optimized kernel hook parses raw Ethernet, IPv4, and TCP headers mathematically to locate TLS 1.3 ClientHello messages right at the network card's Receive (RX) ring, before the Linux kernel even allocates an `sk_buff`. 
-* **Stateful TCP Retransmission Tracker:** The Ring-0 filter integrates an eBPF LRU (Least Recently Used) Hash Map. If a packet is dropped downstream and the client retransmits, the kernel hook instantly recognizes the TCP Sequence Number, pulls the previously forged quantum payload directly from memory, and fires it back onto the network in nanoseconds—completely bypassing User-Space.
-
-### Phase 2: The Memory Bridge (AF_XDP)
-Because injecting a massive 1,184-byte ML-KEM-768 key violates standard kernel eBPF memory expansion limits, Q-Shift redirects the packet. It is instantly ripped into User-Space RAM via an `AF_XDP` Shared Memory Ring for manipulation without traditional socket overhead.
-
-### Phase 3: Dynamic TLS Pointer Jumper (The Parser)
-Before injection, Q-Shift must navigate the variable-length structure of a TLS 1.3 packet (e.g., changing SNI domain lengths). The C daemon utilizes a strict, bounds-checked Type-Length-Value (TLV) Pointer Jumper. It dynamically maps the packet structure in microseconds, vaults over irrelevant extensions, and locks onto the exact byte offset of the `key_share` extension, guaranteeing zero payload corruption regardless of the client browser.
-
-### Phase 4: The Async Entropy Broker & FIPS 203 Quantum Forge (liboqs)
-To guarantee mathematical perfection, Q-Shift does not rely on local pseudo-randomness. The engine pre-fetches true, hardware-derived quantum entropy directly from the Cisco Outshift QRNG API.
-* **Decoupled Architecture:** To prevent API latency from bottlenecking the network, the Cisco API calls are abstracted into a standalone, asynchronous background daemon (`entropy_broker`). The broker silently pipes massive blocks of quantum noise into a Linux shared memory pipe (`/dev/shm`). The main Ring-0 shield reads this pipe at RAM speeds and feeds it into the bleeding-edge `liboqs` Open Quantum Safe engine to forge a strict, NIST FIPS 203 compliant ML-KEM-768 keypair in real-time. If the external API drops, the system gracefully fails-open to a local PRNG fallback to maintain network uptime.
-
-### Phase 5: Dynamic MTU TCP Segmentation
-The engine dynamically queries the interface's Maximum Transmission Unit (MTU). If the injected 1,184-byte key causes the packet to exceed hardware limits (e.g., standard 1500-byte Ethernet), Q-Shift executes raw TCP segmentation to cleave the payload into a standard Vanguard packet and a Remnant overflow packet.
-
-### Phase 6: The Re-Entry (RFC 1071)
-Q-Shift mathematically recalculates the incremental RFC 1071 IP and TCP checksums for the segmented packets. It tags them with a secret `0x7777` IP identification watermark to prevent broadcast storms, and slams them directly into the Transmit (TX) Ring.
+[![License](https://img.shields.io/badge/License-AGPL%20v3.0-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20eBPF-lightgrey)]()
+[![Architecture](https://img.shields.io/badge/Architecture-Ring--0%20%7C%20Stateless-success)]()
 
 ---
 
-## 🚀 Installation & Build Guide
+## 📖 Overview
+The cryptographic bedrock of the internet is facing an existential threat known as "Harvest Now, Decrypt Later" (HNDL). Adversaries are actively warehousing standard RSA/ECC encrypted traffic with the certainty that Cryptographically Relevant Quantum Computers (CRQCs) will eventually shatter classical encryption. Upgrading enterprise fleets to Post-Quantum standards usually requires massive application-level rewrites, library updates, and significant downtime. 
 
-Q-Shift requires the Open Quantum Safe library (`liboqs`) compiled directly from source to ensure FIPS 203 compliance.
+Q-Shift is designed to solve this entirely at the hardware/OS layer. It is a transparent, in-kernel network middleware that leverages Extended Berkeley Packet Filter (eBPF) at the eXpress Data Path (XDP) layer. Q-Shift intercepts classical TLS 1.3 handshakes in real-time and injects NIST-standardized Post-Quantum Cryptography (ML-KEM-768) directly into the packets. This instantly upgrades unpatchable, legacy backend servers to quantum-resistant standards without altering a single line of their application code.
 
-### 1. Install Core Dependencies (Ubuntu/Debian):
-```bash
-sudo apt update
-sudo apt install clang llvm libbpf-dev libelf-dev libcurl4-openssl-dev cmake gcc libssl-dev -y
-```
+**The Core Mandate:** Q-Shift operates on strict privacy-by-design and sovereign infrastructure principles. It operates entirely statelessly, ensuring payloads are never decrypted and critical key material never relies on centralized cloud orchestration for its execution flow.
 
-### 2. Build & Install the Quantum Forge (liboqs):
-```bash
-cd ~
-git clone https://github.com/open-quantum-safe/liboqs.git
-cd liboqs
-mkdir build && cd build
-cmake -DOQS_USE_OPENSSL=1 ..
-make -j4
-sudo make install
-sudo ldconfig  # Refresh the kernel library cache
-```
+## ✨ Key Features
+* **Ring-0 Fast-Path & TCP State Machine:** Utilizes an eBPF LRU (Least Recently Used) Hash Map to track TCP Sequence Numbers. If a packet drops, the kernel hook instantly catches the TCP retransmission and fires the pre-forged quantum payload back from memory in nanoseconds, bypassing User-Space entirely.
+* **Dynamic TLS 1.3 Pointer Jumper:** Replaces hardcoded offsets with a strict, bounds-checked Type-Length-Value (TLV) parsing engine. It dynamically vaults over variable-length SNIs and cipher suites to lock onto the exact `key_share` extension byte offset in microseconds.
+* **Decoupled Async Entropy Broker:** Completely abstracts quantum hardware API logic. A background broker pre-fetches true quantum noise from the Cisco Outshift QRNG API and pipes it into a `/dev/shm` RAM pipe, ensuring the Ring-0 packet filter is never bottlenecked by network latency.
+* **FIPS 203 Quantum Forge:** Feeds true physical quantum entropy into the `liboqs` engine to generate flawless, NIST-compliant ML-KEM-768 keypairs on the fly. Gracefully fails-open to local PRNG if the hardware API drops.
+* **Dynamic TCP Segmentation:** Automatically queries hardware MTU. If the 1,184-byte quantum key injection exceeds physical interface limits, the engine mathematically cleaves the payload into a standard Vanguard packet and a Remnant overflow packet, forging valid RFC 1071 checksums for both.
 
-### 3. Clone & Compile Q-Shift:
-```bash
-cd ~
-git clone https://github.com/YOUR_USERNAME/Q-Shift.git
-cd Q-Shift
-```
+## 🛠️ Tech Stack
+* **Language:** C / eBPF Bytecode
+* **Framework:** libbpf / xdp-tools
+* **Environment:** Linux Kernel (Ubuntu 24.04 / WSL2) / Clang / LLVM
+* **Key Libraries/APIs:** Open Quantum Safe (`liboqs`), OpenSSL (`libcrypto`), Cisco Outshift QRNG API
 
-### 4. Configure Cisco QRNG Authentication:
-Before compiling, you must provide your Cisco Outshift API key to enable hardware entropy for the background broker.
+## ⚙️ Architecture & Data Flow
+Q-Shift operates as a multi-stage, high-velocity pipeline intercepting packets before the kernel network stack allocates an `sk_buff`.
 
-1. Open `entropy_broker.c`.
-2. Locate the HTTP header block.
-3. Replace `YOUR_CISCO_OUTSHIFT_API_KEY_HERE` with your actual token.
+* **Input:** The Ring-0 XDP filter parses raw Ethernet/IPv4/TCP headers. If a TLS 1.3 ClientHello is detected, it is vaulted into User-Space RAM via an `AF_XDP` Shared Memory (UMEM) bridge, bypassing strict kernel memory-expansion limits.
+* **Processing:** The C daemon dynamically parses the TLS payload, reads pre-fetched hardware quantum entropy from the Async Broker, and injects a mathematically forged ML-KEM-768 key into the `key_share` extension. If the new size breaches the hardware MTU, the packet is segmented.
+* **Output:** Incremental RFC 1071 checksums are recalculated, an IP identification watermark (`0x7777`) is applied, and the fortified packets are slammed directly back into the NIC's Transmit (TX) ring.
 
-### 5. Build the Shield:
-```bash
-make clean
-make
-```
+## 🔒 Privacy & Data Sovereignty
+* **Data Collection:** Absolute zero. Q-Shift operates as a stateless proxy at the byte level. It never decrypts payloads, stores user data, or logs IP addresses.
+* **Permissions Required:** Requires `CAP_SYS_ADMIN` and `CAP_NET_ADMIN` (Root) to bind eBPF programs to the physical Network Interface Card (NIC) and manage raw memory frames.
+* **Cloud Connectivity:** Strictly offline-first architecture. The Entropy Broker fetches external quantum noise, but if isolated, the entire gateway gracefully falls back to local mathematical PRNG without dropping active network traffic. The AGPLv3 license legally prevents cloud providers from closing the source on network-level modifications.
 
-## 🧪 Local Loopback Testing
-To watch the forge work in real-time, you can simulate a client-server connection entirely on your local machine using three terminal windows.
+## 🚀 Getting Started
 
-**Terminal 1: Launch the Broker and Shield**
-```bash
-# Start the async entropy broker in the background
-./entropy_broker > /dev/null 2>&1 &
+### Prerequisites
+* Linux OS (Ubuntu/Debian recommended) with Kernel 5.4+
+* Root privileges for XDP attachment
+* Clang, LLVM, libbpf-dev, libelf-dev, libcurl4-openssl-dev
+* Compiled `liboqs` with OpenSSL hardware acceleration enabled
 
-# Attach the eBPF hook to the loopback interface
-sudo ./qshift_user -i lo
-```
+### Installation
 
-**Terminal 2: The Dummy Server**
-```bash
-# Open a raw network socket to hold port 443 open
-sudo nc -lnvp 443
-```
+1. **Clone the repository:**
+   ```bash
+   git clone [https://github.com/thesnmc/Q-Shift.git](https://github.com/thesnmc/Q-Shift.git)
+   cd Q-Shift
+   ```
 
-**Terminal 3: The Client Handshake**
-```bash
-# Fire a TLS 1.3 ClientHello packet
-curl -k -v https://127.0.0.1
-```
-Look at Terminal 1. You will see Q-Shift instantly intercept the packet, dynamically parse the TLS payload, ingest the pre-fetched Cisco entropy, forge the FIPS 203 key, and inject it into the payload before `nc` ever sees it.
+2. **Build and install the Quantum Forge (liboqs):**
+   *(See the detailed `ARCHITECTURE.md` for `liboqs` compilation instructions)*
 
-## 🏗️ Production Implementation Strategy
-Q-Shift is designed to act as an invisible cryptographic gateway. To implement this in a real-world enterprise environment:
+3. **Configure the Cisco QRNG Entropy Broker:**
+   * Open `entropy_broker.c`.
+   * Replace `YOUR_CISCO_OUTSHIFT_API_KEY_HERE` with your active token.
 
-* **Deploy at the Edge:** Run Q-Shift on the Edge Router, Reverse Proxy (like an Nginx/HAProxy box), or the physical Linux Gateway bridging the external internet to your internal network.
-* **Target the External Interface:** Run the daemon targeting the public-facing NIC (e.g., `sudo ./qshift_user -i eth0`).
+4. **Compile the Q-Shift Gateway:**
+   ```bash
+   make clean
+   make
+   ```
 
-**The Result:** All incoming external traffic is mathematically upgraded to Post-Quantum standards at Ring-0. The internal legacy backend servers (which only understand classical RSA/ECC) remain completely untouched, oblivious, and secure.
+5. **Ignite the Shield (Targeting Loopback for testing):**
+   ```bash
+   # Launch the background broker
+   ./entropy_broker > /dev/null 2>&1 &
 
-Built for sovereign network infrastructure. Designed for zero-trust environments.
+   # Attach the eBPF hook
+   sudo ./qshift_user -i lo
+   ```
 
-*TheSNMC*
+## 🤝 Contributing
+Contributions, issues, and feature requests are welcome. Feel free to check the issues page if you want to contribute to the sovereign architecture.
+
+## 📄 License
+This project is licensed under the GNU Affero General Public License v3.0 (AGPLv3) - see the LICENSE file for details.  
+Built by an independent systems architect in Chennai, India.
